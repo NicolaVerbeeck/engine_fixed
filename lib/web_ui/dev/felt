@@ -1,0 +1,116 @@
+#!/bin/bash
+set -e
+
+# felt: a command-line utility for building and testing Flutter web engine.
+#       It stands for Flutter Engine Local Tester.
+# TODO: Add git fetch --tags step. Tags are critical for the correct Dart
+# version.
+
+FELT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+KERNEL_NAME=`uname`
+CPU_NAME=`uname -m`
+ENGINE_SRC_DIR="$(dirname $(dirname $(dirname $(dirname ${FELT_DIR}))))"
+FLUTTER_DIR="${ENGINE_SRC_DIR}/flutter"
+SDK_PREBUILTS_DIR="${FLUTTER_DIR}/prebuilts"
+
+if [ -z "${DART_SDK_DIR}" ]
+then
+  if [[ $KERNEL_NAME == *"Darwin"* ]]
+  then
+    TARGET_OS="macos"
+  elif [[ $KERNEL_NAME == *"Linux"* ]]
+  then
+    TARGET_OS="linux"
+  else
+    echo "Unrecognized kernel name: ${KERNEL_NAME}"
+    exit 1
+  fi
+
+  if [[ $CPU_NAME == *"x86_64"* ]]
+  then
+    TARGET_ARCH="x64"
+  elif [[ $CPU_NAME == *"arm64"* ]]
+  then
+    TARGET_ARCH="arm64"
+  else
+    echo "Unrecognized architecture: ${CPU_NAME}"
+    exit 1
+  fi
+
+  PREBUILT_TARGET="${TARGET_OS}-${TARGET_ARCH}"
+  DART_SDK_DIR="${SDK_PREBUILTS_DIR}/${PREBUILT_TARGET}/dart-sdk"
+
+  if [ ! -d "$DART_SDK_DIR" ]
+  then
+    echo "Prebuilt dart sdk for ${PREBUILT_TARGET} not found."
+    echo "Note: You can specify your own path to a built dart sdk with the DART_SDK_DIR environment variable."
+    exit 1
+  fi
+
+else
+  if [ ! -d "$DART_SDK_DIR" ]
+  then 
+    echo "Explicitly specified dart SDK not found at ${DART_SDK_DIR}."
+    exit 1
+  fi
+fi
+
+WEB_UI_DIR="${FLUTTER_DIR}/lib/web_ui"
+DART_PATH="$DART_SDK_DIR/bin/dart"
+
+if [[ "$FELT_DEBUG" == "true" || "$FELT_DEBUG" == "1" ]]
+then
+  FELT_DEBUG_FLAGS="--enable-vm-service --pause-isolates-on-start"
+fi
+
+install_deps() {
+  # We need to run pub get here before we actually invoke felt.
+  echo "Running \`dart pub get\` in 'engine/src/flutter/lib/web_ui'"
+  (cd "$WEB_UI_DIR"; $DART_PATH pub get)
+}
+
+if [[ $KERNEL_NAME == *"Darwin"* ]]
+then
+  echo "Running on MacOS. Will check the file and user limits."
+  # Disable exit if the commands fails. We want to give more actionable
+  # error message.
+  set +e
+  ULIMIT_FILES=`ulimit -n`
+  # Increase the file limit if it is low. Note that these limits are changed
+  # only for this script (for this shell). After felt execution is completed
+  # no change is required to reset the original shell.
+  if [[ $ULIMIT_FILES -lt 50000 ]]
+  then
+    echo "File limits too low increasing the file limits"
+    # Get the max file limit.
+    MAX_ULIMIT_FILES=`launchctl limit maxfiles | sed -e 's/^[[:space:]]*//' | sed 's/ \{1,\}/ /g' | cut -d' ' -f2`
+    if [[ $MAX_ULIMIT_FILES -lt 50000 ]]
+    then
+      # Increase the maximum file limit.
+      sudo launchctl limit maxfiles 50000 200000
+    fi
+    ERROR=$(ulimit -n 50000 2>&1 >/dev/null)
+    if [[ ! -z $ERROR ]]
+    then
+      echo "Problem changing the file limit. Please try to reboot to use the higher limits. error: \n$ERROR" 1>&2
+    fi
+  fi
+  ULIMIT_USER=`ulimit -u`
+  # Increase the hard user limit if it is lower than 2048.
+  if [[ $ULIMIT_USER -lt 4096 ]]
+  then
+    echo "User limits too low increasing the user limits"
+    ERROR2=$(ulimit -u 4096 2>&1 >/dev/null)
+    if [[ ! -z $ERROR2 ]]
+    then
+      echo "Problem changing the user limit. Please try to reboot to use the higher limits. error: \n$ERROR2" 1>&2
+    fi
+  fi
+  # Set the value back to exit on non zero results.
+  set -e
+fi
+
+cd $WEB_UI_DIR
+install_deps
+(cd $WEB_UI_DIR && $DART_SDK_DIR/bin/dart run $FELT_DEBUG_FLAGS dev/felt.dart $@)
